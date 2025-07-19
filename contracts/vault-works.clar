@@ -205,3 +205,108 @@
     (mint-tokens tx-sender amount)
   )
 )
+
+;; Stake Withdrawal Function
+;; Allows users to withdraw after lock period expires
+;; Implements security checks to prevent unauthorized access
+;; Param: amount - STX amount to withdraw (microSTX units)
+;; Returns: Success confirmation
+(define-public (withdraw (amount uint))
+  (begin
+    (try! (check-initialized))
+    (asserts! (> amount u0) err-zero-amount)
+    (let (
+        (deposit-info (unwrap! (map-get? deposits tx-sender) err-unauthorized))
+        (user-balance (unwrap! (get-balance tx-sender) err-unauthorized))
+      )
+      (asserts! (>= stacks-block-height (get lock-until deposit-info))
+        err-locked-period
+      )
+      (asserts! (>= user-balance amount) err-insufficient-balance)
+      ;; Burn governance tokens first
+      (try! (burn-tokens tx-sender amount))
+      ;; Execute secure STX return
+      (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender))
+    )
+  )
+)
+
+;; Governance Proposal Creation
+;; Enables stakeholders to propose treasury allocations
+;; Implements comprehensive validation for proposal integrity
+;; Params: description, amount, target, duration
+;; Returns: Unique proposal ID
+(define-public (create-proposal
+    (description (string-ascii 256))
+    (amount uint)
+    (target principal)
+    (duration uint)
+  )
+  (begin
+    (try! (check-initialized))
+    ;; Comprehensive input validation
+    (asserts! (> (len description) u0) err-invalid-description)
+    (asserts! (> amount u0) err-zero-amount)
+    (asserts! (not (is-eq target (as-contract tx-sender))) err-invalid-target)
+    (asserts! (and (>= duration minimum-duration) (<= duration maximum-duration))
+      err-invalid-duration
+    )
+    (let (
+        (proposer-balance (unwrap! (map-get? balances tx-sender) err-unauthorized))
+        (proposal-id (+ (var-get proposal-count) u1))
+      )
+      (asserts! (> proposer-balance u0) err-unauthorized)
+      ;; Create validated proposal record
+      (map-set proposals proposal-id {
+        proposer: tx-sender,
+        description: description,
+        amount: amount,
+        target: target,
+        expires-at: (+ stacks-block-height duration),
+        executed: false,
+        yes-votes: u0,
+        no-votes: u0,
+      })
+      (var-set proposal-count proposal-id)
+      (ok proposal-id)
+    )
+  )
+)
+
+;; Democratic Voting Function
+;; Enables stake-weighted voting on active proposals
+;; Implements anti-manipulation safeguards
+;; Params: proposal-id, vote-for (boolean)
+;; Returns: Success confirmation
+(define-public (vote
+    (proposal-id uint)
+    (vote-for bool)
+  )
+  (begin
+    (try! (check-initialized))
+    (try! (validate-proposal-id proposal-id))
+    (let (
+        (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
+        (voter-power (calculate-voting-power tx-sender))
+      )
+      (asserts! (> voter-power u0) err-unauthorized)
+      (asserts! (< stacks-block-height (get expires-at proposal))
+        err-proposal-expired
+      )
+      (asserts!
+        (is-none (map-get? votes {
+          proposal-id: proposal-id,
+          voter: tx-sender,
+        }))
+        err-already-voted
+      )
+      ;; Immutable vote registration
+      (map-set votes {
+        proposal-id: proposal-id,
+        voter: tx-sender,
+      }
+        vote-for
+      )
+      ;; Atomic vote count update
+      (map-set proposals proposal-id
+        (merge proposal {
