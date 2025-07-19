@@ -103,3 +103,105 @@
   }
   bool
 )
+
+;; INTERNAL UTILITIES
+
+;; Verify contract owner privileges
+(define-private (is-contract-owner)
+  (is-eq tx-sender contract-owner)
+)
+
+;; Ensure system initialization
+(define-private (check-initialized)
+  (ok (asserts! (var-get initialized) err-not-initialized))
+)
+
+;; Validate proposal ID bounds
+(define-private (validate-proposal-id (proposal-id uint))
+  (ok (asserts! (<= proposal-id (var-get proposal-count)) err-invalid-proposal-id))
+)
+
+;; Calculate stake-weighted voting power
+(define-private (calculate-voting-power (voter principal))
+  (default-to u0 (map-get? balances voter))
+)
+
+;; Secure token transfer mechanism
+(define-private (transfer-tokens
+    (sender principal)
+    (recipient principal)
+    (amount uint)
+  )
+  (let (
+      (sender-balance (default-to u0 (map-get? balances sender)))
+      (recipient-balance (default-to u0 (map-get? balances recipient)))
+    )
+    (asserts! (>= sender-balance amount) err-insufficient-balance)
+    (map-set balances sender (- sender-balance amount))
+    (map-set balances recipient (+ recipient-balance amount))
+    (ok true)
+  )
+)
+
+;; Controlled token minting
+(define-private (mint-tokens
+    (account principal)
+    (amount uint)
+  )
+  (let ((current-balance (default-to u0 (map-get? balances account))))
+    (map-set balances account (+ current-balance amount))
+    (var-set total-supply (+ (var-get total-supply) amount))
+    (ok true)
+  )
+)
+
+;; Secure token burning
+(define-private (burn-tokens
+    (account principal)
+    (amount uint)
+  )
+  (let ((current-balance (default-to u0 (map-get? balances account))))
+    (asserts! (>= current-balance amount) err-insufficient-balance)
+    (map-set balances account (- current-balance amount))
+    (var-set total-supply (- (var-get total-supply) amount))
+    (ok true)
+  )
+)
+
+;; PUBLIC INTERFACE
+
+;; System Initialization
+;; Establishes the protocol's operational foundation
+;; Access: Contract owner only
+;; Returns: Success confirmation
+(define-public (initialize)
+  (begin
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (not (var-get initialized)) err-already-initialized)
+    (var-set initialized true)
+    (ok true)
+  )
+)
+
+;; Stake Deposit Function
+;; Enables users to stake STX and receive governance tokens
+;; Implements time-lock security to prevent flash attacks
+;; Param: amount - STX amount to stake (microSTX units)
+;; Returns: Success confirmation
+(define-public (deposit (amount uint))
+  (begin
+    (try! (check-initialized))
+    (asserts! (>= amount (var-get minimum-deposit)) err-below-minimum)
+    (asserts! (> amount u0) err-zero-amount)
+    ;; Secure STX transfer to protocol vault
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    ;; Register stake with security parameters
+    (map-set deposits tx-sender {
+      amount: amount,
+      lock-until: (+ stacks-block-height (var-get lock-period)),
+      last-reward-block: stacks-block-height,
+    })
+    ;; Issue proportional governance tokens
+    (mint-tokens tx-sender amount)
+  )
+)
