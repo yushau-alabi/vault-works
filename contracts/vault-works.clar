@@ -310,3 +310,98 @@
       ;; Atomic vote count update
       (map-set proposals proposal-id
         (merge proposal {
+            yes-votes: (if vote-for
+            (+ (get yes-votes proposal) voter-power)
+            (get yes-votes proposal)
+          ),
+          no-votes: (if vote-for
+            (get no-votes proposal)
+            (+ (get no-votes proposal) voter-power)
+          ),
+        })
+      )
+      (ok true)
+    )
+  )
+)
+
+;; Proposal Execution Engine
+;; Automatically executes approved proposals with security checks
+;; Implements majority consensus validation
+;; Param: proposal-id
+;; Returns: Success confirmation
+(define-public (execute-proposal (proposal-id uint))
+  (begin
+    (try! (check-initialized))
+    (try! (validate-proposal-id proposal-id))
+    (let (
+        (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
+        (contract-balance (stx-get-balance (as-contract tx-sender)))
+      )
+      (asserts! (not (get executed proposal)) err-unauthorized)
+      (asserts! (>= stacks-block-height (get expires-at proposal))
+        err-proposal-expired
+      )
+      (asserts! (> (get yes-votes proposal) (get no-votes proposal))
+        err-unauthorized
+      )
+      (asserts! (>= contract-balance (get amount proposal))
+        err-insufficient-balance
+      )
+      ;; Execute approved treasury allocation
+      (try! (as-contract (stx-transfer? (get amount proposal) (as-contract tx-sender)
+        (get target proposal)
+      )))
+      ;; Mark proposal as permanently executed
+      (map-set proposals proposal-id (merge proposal { executed: true }))
+      (ok true)
+    )
+  )
+)
+
+;; READ-ONLY INTERFACE
+
+;; Balance Query Function
+;; Retrieves governance token balance for any account
+;; Param: account - Principal to query
+;; Returns: Token balance
+(define-read-only (get-balance (account principal))
+  (ok (default-to u0 (map-get? balances account)))
+)
+
+;; Total Supply Query
+;; Returns the total circulating governance tokens
+;; Returns: Total token supply
+(define-read-only (get-total-supply)
+  (ok (var-get total-supply))
+)
+
+;; Proposal Details Query
+;; Retrieves comprehensive proposal information
+;; Param: proposal-id
+;; Returns: Complete proposal record
+(define-read-only (get-proposal (proposal-id uint))
+  (ok (map-get? proposals proposal-id))
+)
+
+;; Deposit Information Query
+;; Retrieves staking details for any account
+;; Param: account - Principal to query
+;; Returns: Deposit record with lock status
+(define-read-only (get-deposit-info (account principal))
+  (ok (map-get? deposits account))
+)
+
+;; Vote History Query
+;; Retrieves voting record for specific proposal-voter pair
+;; Params: proposal-id, voter
+;; Returns: Vote cast (true/false) or none
+(define-read-only (get-vote
+    (proposal-id uint)
+    (voter principal)
+  )
+  (ok (map-get? votes {
+    proposal-id: proposal-id,
+    voter: voter,
+  }))
+)
